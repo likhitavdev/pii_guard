@@ -1,0 +1,63 @@
+name: CI/CD
+
+# CI: Run tests on every push and pull request to main
+# CD: Create a versioned GitHub Release when tests pass on main
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ─── CI JOB: Run the test suite ───────────────────────────────────────────
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Check out the code
+      - uses: actions/checkout@v4
+
+      # Step 2: Set up Python
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Step 3: Install pytest (our test runner)
+      - name: Install dependencies
+        run: pip install pytest
+
+      # Step 4: Run all tests
+      - name: Run tests
+        run: pytest tests/ -v
+
+  # ─── CD JOB: Create a GitHub Release ──────────────────────────────────────
+  # Only runs when:
+  #   (a) the test job above passes, AND
+  #   (b) this is a push to main (not a pull request)
+  # This makes the full pipeline: code pushed → tests run → release created.
+  release:
+    name: Create Release
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    permissions:
+      contents: write    # needed to create tags and releases
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create versioned release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="v1.0.${{ github.run_number }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "$VERSION"
+          git push origin "$VERSION"
+          gh release create "$VERSION" \
+            --title "Release $VERSION" \
+            --notes "Automated release — all ${{ github.run_number }} CI checks passed." \
+            --latest
