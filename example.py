@@ -1,81 +1,87 @@
-"""
-example.py — PII Guard in action
+"""Demo: protect a prompt, call a model, get the answer back with real values.
 
-Shows the full input-layer protection flow:
-  user prompt → PII scan → tokenize → send CLEAN prompt to LLM → print response
+    python example.py                 # mock model, no key needed
+    OPENAI_API_KEY=... python example.py   # real gpt-4o-mini call
 
-Loads OpenAI API key from .env file (never hardcoded).
-Falls back to a mock LLM if no key is found.
+For the real call: pip install -r requirements-example.txt
 """
 import os
-from dotenv import load_dotenv
-from pii_guard import sanitize
 
-# Load API key from .env
-load_dotenv()
-_api_key = os.environ.get("OPENAI_API_KEY")
+from pii_guard import protect
 
-if _api_key:
-    import openai
-    _client = openai.OpenAI(api_key=_api_key)
-    USE_REAL_LLM = True
-    print("[INFO] OpenAI API key loaded — using real LLM (gpt-4o-mini)")
-else:
-    USE_REAL_LLM = False
-    print("[INFO] No API key found — using mock LLM")
+try:
+    from dotenv import load_dotenv
 
+    load_dotenv()
+except ImportError:  # python-dotenv is optional
+    pass
 
-def llm_call(prompt: str) -> str:
-    if USE_REAL_LLM:
-        response = _client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}]
-        )
-        return response.choices[0].message.content
-    else:
-        return (
-            f"[Mock LLM Response] Received {len(prompt)} chars. "
-            f"No PII reached the model."
-        )
+PROMPT = """\
+Customer record for support ticket 4821:
+Name: Jane Smith
+SSN: 123-45-6789
+Card on file: 4532-0151-1283-0366
+Email: jane.smith@example.com
+Phone: (732) 555-0101
+
+Write a two-sentence internal note saying we verified this customer's identity.
+Refer to the SSN, card, email and phone by the exact placeholder text shown in the record.
+"""
+LOG_PATH = "example_audit.jsonl"
 
 
-def main():
-    user_prompt = """
-    Hi, I need help reviewing my account details.
-    My name is Jane Smith.
-    SSN: 123-45-6789
-    Credit card: 4532-0151-1283-0366
-    Email: jane.smith@example.com
-    Phone: 732-555-0101
-    Please confirm everything looks correct.
-    """
+def make_llm():
+    if os.environ.get("OPENAI_API_KEY"):
+        import openai
 
-    print("=" * 60)
-    print("ORIGINAL PROMPT (contains PII — never send this to LLM)")
-    print("=" * 60)
-    print(user_prompt)
+        client = openai.OpenAI()
+        print("[INFO] OPENAI_API_KEY found: calling gpt-4o-mini")
 
-    clean_prompt, vault = sanitize(user_prompt)
+        def call(prompt: str) -> str:
+            reply = client.chat.completions.create(
+                model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}]
+            )
+            return reply.choices[0].message.content
 
-    print("=" * 60)
-    print("SANITIZED PROMPT (safe to send to LLM)")
-    print("=" * 60)
-    print(clean_prompt)
+        return call
 
-    print("=" * 60)
-    print(f"AUDIT LOG — {vault.count()} PII item(s) detected")
-    print("(masked display values — raw PII never appears in logs)")
-    print("=" * 60)
-    for token, masked_display in vault.all_detections().items():
-        print(f"  {token:20s}  →  {masked_display}")
+    print("[INFO] No OPENAI_API_KEY: using a mock model that echoes the placeholders")
 
-    print()
-    print("=" * 60)
-    print("LLM RESPONSE (received clean prompt with tokens, not raw PII)")
-    print("=" * 60)
-    response = llm_call(clean_prompt)
-    print(response)
-    print()
+    def mock(prompt: str) -> str:
+        placeholders = [w.strip(",.:") for w in prompt.split() if w.startswith("[")]
+        return "I received: " + ", ".join(placeholders)
+
+    return mock
+
+
+def banner(title: str) -> None:
+    print("\n" + "=" * 64 + f"\n{title}\n" + "=" * 64)
+
+
+def main() -> None:
+    result = protect(PROMPT, make_llm(), log_path=LOG_PATH)
+
+    banner("SENT TO THE MODEL (no raw PII)")
+    print(result.clean_prompt)
+
+    banner(f"AUDIT LOG ({len(result.audit)} items, masked, safe to store)")
+    for rec in result.audit:
+        print(f"  {rec['token']:<28} {rec['type']:<12} {rec['display']}")
+
+    banner("MODEL REPLY, as returned (still tokenized)")
+    print(result.raw_response)
+
+    banner("MODEL REPLY, after de-tokenization (shown to the user only)")
+    print(result.response)
+
+    rec = result.record
+    banner(f"WHAT THE LOG SAYS (appended to {LOG_PATH})")
+    print(f"  masked and sent as tokens : {len(rec['sent']['tokens_present'])}")
+    print(f"  raw PII still in prompt   : {rec['sent']['residual_pii'] or 'none'}")
+    print(f"  tokens the model returned : {len(rec['reply']['tokens_returned'])}")
+    print(f"  tokens restored for user  : {len(rec['reply']['restored'])}")
+    if rec["reply"]["tokens_not_returned"]:
+        print(f"  not returned by the model : {rec['reply']['tokens_not_returned']}")
 
 
 if __name__ == "__main__":

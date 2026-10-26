@@ -1,7 +1,7 @@
 name: CI/CD
 
-# CI: Run tests on every push and pull request to main
-# CD: Create a versioned GitHub Release when tests pass on main
+# CI: tests + labeled-corpus evaluation on every push and pull request to main.
+# CD: a versioned GitHub Release is created when CI passes on a push to main.
 on:
   push:
     branches: [main]
@@ -9,33 +9,32 @@ on:
     branches: [main]
 
 jobs:
-  # ─── CI JOB: Run the test suite ───────────────────────────────────────────
   test:
-    name: Run Tests
+    name: Test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
 
     steps:
-      # Step 1: Check out the code
       - uses: actions/checkout@v4
 
-      # Step 2: Set up Python
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements*.txt
 
-      # Step 3: Install pytest (our test runner)
-      - name: Install dependencies
-        run: pip install pytest
+      - name: Install package with dev dependencies
+        run: pip install -e ".[dev]"
 
-      # Step 4: Run all tests
       - name: Run tests
-        run: pytest tests/ -v
+        run: pytest -v
 
-  # ─── CD JOB: Create a GitHub Release ──────────────────────────────────────
-  # Only runs when:
-  #   (a) the test job above passes, AND
-  #   (b) this is a push to main (not a pull request)
-  # This makes the full pipeline: code pushed → tests run → release created.
+      - name: Evaluate detectors on the labeled corpus
+        run: python -m evaluation.run_eval
+
   release:
     name: Create Release
     needs: test
@@ -43,7 +42,7 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
     permissions:
-      contents: write    # needed to create tags and releases
+      contents: write  # needed to create tags and releases
 
     steps:
       - uses: actions/checkout@v4
@@ -52,12 +51,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="v1.0.${{ github.run_number }}"
+          VERSION="v1.1.${{ github.run_number }}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git tag "$VERSION"
           git push origin "$VERSION"
           gh release create "$VERSION" \
             --title "Release $VERSION" \
-            --notes "Automated release — all ${{ github.run_number }} CI checks passed." \
+            --notes "Automated release. Tests passed on Python 3.10-3.12 (run ${{ github.run_number }})." \
             --latest

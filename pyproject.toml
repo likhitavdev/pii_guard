@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pii-guard"
+version = "1.1.0"
+description = "Tokenize PII before it reaches an LLM, restore it in the reply, and keep audit logs free of raw values."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["cryptography>=42"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+example = ["openai>=1.0", "python-dotenv>=1.0"]
+
+[project.scripts]
+pii-guard = "pii_guard.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["pii_guard*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,118 +1,79 @@
-"""
-test_sanitizer.py — Integration tests for the full sanitize() pipeline
-
-These tests verify the whole flow:
-  input text → detect → tokenize → vault stores mapping → clean text returned
-
-With the masking layer now integrated, we also verify that:
-  - vault.retrieve() returns the ORIGINAL value (for de-tokenization)
-  - vault.all_detections() returns MASKED display values (safe for audit logs)
-"""
-from pii_guard.sanitizer import sanitize
+"""Integration tests for sanitize(): detect -> tokenize -> vault -> clean text."""
+from pii_guard import Vault, sanitize
 
 
 def test_ssn_removed_from_text():
-    text = "My SSN is 123-45-6789"
+    clean, vault = sanitize("My SSN is 123-45-6789", nonce="")
+    assert clean == "My SSN is [SSN_1]"
+    assert vault.retrieve("[SSN_1]") == "123-45-6789"
+
+
+def test_all_four_types_removed():
+    text = ("SSN 123-45-6789, card 4532015112830366, email jane@example.com, "
+            "phone (732) 555-0101")
     clean, vault = sanitize(text)
-
-    assert "123-45-6789" not in clean        # original gone
-    assert "[SSN_1]" in clean                # token present
-    assert vault.retrieve("[SSN_1]") == "123-45-6789"   # vault has original
-
-
-def test_email_removed_from_text():
-    text = "Email me at jane@example.com please"
-    clean, vault = sanitize(text)
-
-    assert "jane@example.com" not in clean
-    assert "[EMAIL_1]" in clean
-
-
-def test_multiple_pii_types_all_removed():
-    """The DSA test — multiple PII types in one string, all must be replaced correctly."""
-    text = "SSN: 123-45-6789 and card: 4532015112830366 and email: jane@example.com"
-    clean, vault = sanitize(text)
-
-    assert "123-45-6789" not in clean
-    assert "4532015112830366" not in clean
-    assert "jane@example.com" not in clean
-    assert vault.count() == 3
+    for raw in ("123-45-6789", "4532015112830366", "jane@example.com", "(732) 555-0101"):
+        assert raw not in clean
+    assert vault.count() == 4
+    assert "(" not in clean  # no stray fragment of the phone number is left behind
 
 
 def test_clean_text_unchanged():
-    """No PII → text comes back exactly as given."""
     text = "This is a completely clean message with no PII."
     clean, vault = sanitize(text)
-
-    assert clean == text
-    assert vault.count() == 0
+    assert clean == text and vault.count() == 0
 
 
-def test_vault_token_retrieval():
-    """Vault returns the original value when given the token."""
-    text = "SSN: 123-45-6789"
-    clean, vault = sanitize(text)
-
-    token = "[SSN_1]"
-    assert vault.retrieve(token) == "123-45-6789"
+def test_tokens_are_numbered_in_reading_order():
+    clean, _ = sanitize("First 123-45-6789 then 234-56-7890", nonce="")
+    assert clean == "First [SSN_1] then [SSN_2]"
 
 
-def test_two_ssns_get_unique_tokens():
-    """Two SSNs in the same text should get distinct tokens: [SSN_1] and [SSN_2]."""
-    text = "First SSN: 123-45-6789 and second SSN: 987-65-4321"
-    clean, vault = sanitize(text)
-
-    assert vault.count() == 2
-    assert "123-45-6789" not in clean
-    assert "987-65-4321" not in clean
+def test_same_value_gets_same_token():
+    clean, vault = sanitize("A 123-45-6789 and again 123-45-6789", nonce="")
+    assert clean == "A [SSN_1] and again [SSN_1]"
+    assert vault.count() == 1
 
 
-# ─── MASKING LAYER INTEGRATION TESTS ─────────────────────────────────────────
-# These verify that all_detections() returns masked values, never raw PII.
-# This is the guarantee that makes the audit log safe.
+def test_same_phone_in_two_formats_shares_a_token():
+    clean, vault = sanitize("(732) 555-0101 or 732-555-0101", nonce="")
+    assert clean == "[PHONE_1] or [PHONE_1]"
+    assert vault.count() == 1
 
-def test_audit_log_shows_masked_ssn():
-    """Vault audit log must show masked SSN, not the original."""
-    text = "SSN: 123-45-6789"
-    clean, vault = sanitize(text)
 
+def test_phone_with_parentheses_fully_replaced():
+    clean, _ = sanitize("Call (732) 880-9321 now", nonce="")
+    assert clean == "Call [PHONE_1] now"
+
+
+def test_adjacent_and_mixed_matches_keep_surrounding_text_intact():
+    text = "x 4532015112830366,123-45-6789;jane@example.com! y"
+    clean, _ = sanitize(text, nonce="")
+    assert clean == "x [CREDIT_CARD_1],[SSN_1];[EMAIL_1]! y"
+
+
+def test_vault_can_be_reused_across_turns():
+    _, vault = sanitize("SSN 123-45-6789", nonce="")
+    clean, same = sanitize("Remember 123-45-6789 and also 234-56-7890", vault=vault)
+    assert same is vault
+    assert clean == "Remember [SSN_1] and also [SSN_2]"
+
+
+# --- audit-log safety --------------------------------------------------------
+
+def test_audit_log_shows_masked_values_only():
+    text = "SSN 123-45-6789 card 4532015112830366 email jane@example.com"
+    _, vault = sanitize(text, nonce="")
     detections = vault.all_detections()
-    assert detections["[SSN_1]"] == "***-**-6789"       # masked
-    assert "123-45-6789" not in str(detections)          # raw NOT in log
+    assert detections["[SSN_1]"] == "***-**-6789"
+    assert detections["[CREDIT_CARD_1]"].endswith("0366")
+    assert detections["[EMAIL_1]"] == "j***@example.com"
+    blob = str(detections) + vault.audit_json() + repr(vault)
+    for raw in ("123-45-6789", "4532015112830366", "jane@example.com", "jane"):
+        assert raw not in blob
 
 
-def test_audit_log_shows_masked_credit_card():
-    """Vault audit log must show masked card number, not full digits."""
-    text = "Card: 4532015112830366"
-    clean, vault = sanitize(text)
-
-    detections = vault.all_detections()
-    masked = detections["[CREDIT_CARD_1]"]
-    assert masked.endswith("0366")                       # last 4 preserved
-    assert "45320151" not in masked                      # first digits masked
-
-
-def test_audit_log_shows_masked_email():
-    """Vault audit log must show masked email, not full address."""
-    text = "Email: jane@example.com"
-    clean, vault = sanitize(text)
-
-    detections = vault.all_detections()
-    masked = detections["[EMAIL_1]"]
-    assert "@example.com" in masked                      # domain preserved
-    assert "jane" not in masked                          # username masked
-
-
-def test_original_still_retrievable_for_detokenization():
-    """
-    Masking the display does NOT destroy the original.
-    Retrieve must still return the raw value for de-tokenization.
-    """
-    text = "My SSN is 123-45-6789"
-    clean, vault = sanitize(text)
-
-    # display (audit log) is masked
+def test_original_still_retrievable_after_masking():
+    _, vault = sanitize("SSN 123-45-6789", nonce="")
     assert vault.all_detections()["[SSN_1]"] == "***-**-6789"
-
-    # original (de-tokenization) is intact
     assert vault.retrieve("[SSN_1]") == "123-45-6789"

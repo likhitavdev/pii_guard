@@ -1,15 +1,4 @@
-"""
-test_masker.py — Unit tests for the masking layer
-
-Run with:  pytest tests/ -v
-
-Each masking function gets a best case (normal valid input) and a worst case
-(edge input — too short, unusual format, etc).
-
-The masking methodology follows Hitha's testing process:
-  Unit test each method (best case + worst case) → local integration test
-  → testing team validates with application.
-"""
+"""Unit tests for the masking layer: a normal case and an edge case per function."""
 from pii_guard.masker import mask_credit_card, mask_email, mask_ssn, mask_phone
 
 
@@ -22,7 +11,7 @@ def test_mask_credit_card_plain_digits():
     assert "4532015112830" not in result     # no raw digits exposed
 
 def test_mask_credit_card_with_dashes():
-    """Card numbers often come back from the detector with dashes."""
+    """Detector output can contain separators; they are stripped."""
     result = mask_credit_card("4532-0151-1283-0366")
     assert result.endswith("0366")
     assert "-" not in result                # dashes stripped, digits masked
@@ -100,3 +89,13 @@ def test_mask_phone_too_short():
     """Worst case — fewer than 4 digits."""
     result = mask_phone("555")
     assert "*" in result                    # all masked, no crash
+
+
+def test_mask_email_hides_username_length():
+    short = mask_email("jo@example.com")
+    long_ = mask_email("jonathan.q.public@example.com")
+    assert short == long_ == "j***@example.com"
+
+
+def test_mask_ssn_with_spaces():
+    assert mask_ssn("123 45 6789") == "***-**-6789"
