@@ -152,7 +152,7 @@ Tokens are numbered in reading order, but the replacements are applied from the 
 
 ```bash
 pip install -e ".[dev]"
-pytest                          # 91 tests
+pytest                          # 102 tests
 python -m evaluation.run_eval   # precision/recall on the labeled corpus
 ```
 
